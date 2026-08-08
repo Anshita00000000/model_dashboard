@@ -12,12 +12,22 @@ train/test, predict) are Phase 1, driven by an already-enriched CSV.
 
 from __future__ import annotations
 
+import sys
 from pathlib import Path
 
-import streamlit as st
+# Make the repo root importable regardless of the caller's cwd/PYTHONPATH —
+# `streamlit run` does not reliably put it there on its own (observed to work
+# in some environments and fail in others, e.g. a fresh Colab shell), and this
+# file can be launched directly (`streamlit run app/ui/main.py`, `make run`),
+# not just via the app/main.py shim.
+_REPO_ROOT = Path(__file__).resolve().parents[2]
+if str(_REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(_REPO_ROOT))
 
-from app.core.storage import DEFAULT_STORAGE_ROOT, MetadataStore
-from app.ui import run_history, tab_data_prep, tab_prediction, tab_training
+import streamlit as st  # noqa: E402 (must follow the sys.path fix above)
+
+from app.core.storage import DEFAULT_STORAGE_ROOT, MetadataStore  # noqa: E402
+from app.ui import run_history, tab_data_prep, tab_prediction, tab_training  # noqa: E402
 
 MERCHANTS = ["Evoke", "Misya", "Nivaan"]
 PURPOSES = ["train", "predict"]
