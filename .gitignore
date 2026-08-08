@@ -1,0 +1,10 @@
+.venv/
+__pycache__/
+*.pyc
+.pytest_cache/
+.streamlit/
+
+# Runtime artifact storage — datasets, splits, bundles, predictions, meta.db.
+# These are generated audit-trail data, not source.
+data/*
+!data/.gitkeep
