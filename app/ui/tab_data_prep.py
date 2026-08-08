@@ -67,7 +67,7 @@ def render(store: storage.MetadataStore, merchant: str, storage_root: Path | str
         f"{d['dataset_id']}  ·  {d['source_file']}  ·  {d['row_count']} rows  ·  {d['created_at']}": d
         for d in train_datasets
     }
-    selected_label = st.selectbox("Dataset", list(options.keys()))
+    selected_label = st.selectbox("Dataset", list(options.keys()), key="data_prep_dataset_select")
     dataset_row = options[selected_label]
 
     # Belt-and-suspenders: this tab is a no-op for anything but purpose="train",

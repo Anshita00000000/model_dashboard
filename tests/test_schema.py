@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import pandas as pd
+import pytest
 
 from app.core import schema as schema_mod
 
@@ -87,3 +88,23 @@ def test_validate_clean_dataframe_has_no_violations():
         overrides={"lead_id": {"role": "id"}},
     )
     assert schema_mod.validate(df, s) == []
+
+
+def test_is_blank():
+    assert schema_mod.is_blank(None) is True
+    assert schema_mod.is_blank(float("nan")) is True
+    assert schema_mod.is_blank("") is True
+    assert schema_mod.is_blank("   ") is True
+    assert schema_mod.is_blank(0) is False
+    assert schema_mod.is_blank("x") is False
+
+
+def test_blank_rate():
+    series = pd.Series([1, None, "", "x", float("nan")])
+    assert schema_mod.blank_rate(series) == pytest.approx(3 / 5)
+
+
+def test_blank_rate_empty_series_is_nan():
+    import math
+
+    assert math.isnan(schema_mod.blank_rate(pd.Series([], dtype=object)))

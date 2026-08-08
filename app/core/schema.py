@@ -116,6 +116,29 @@ def _infer_dtype(series: pd.Series) -> str:
     return "numeric" if numeric_ratio >= NUMERIC_PARSE_THRESHOLD else "categorical"
 
 
+def classify_dtype(series: pd.Series) -> str:
+    """Public entry point for the numeric/categorical rule (>=90% parse rate) used
+    across app/core/ — e.g. app/core/features.py reuses this rather than
+    re-implementing it, so the rule only lives in one place.
+    """
+    return _infer_dtype(series)
+
+
+def is_blank(value: Any) -> bool:
+    """Public entry point for the blank-value rule (None, NaN, or an
+    empty/whitespace-only string) used across app/core/ — e.g.
+    app/core/predict.py's null-rate drift check reuses this.
+    """
+    return _is_blank(value)
+
+
+def blank_rate(series: pd.Series) -> float:
+    """Fraction of values in series that are blank. NaN if series is empty."""
+    if len(series) == 0:
+        return float("nan")
+    return float(series.map(_is_blank).mean())
+
+
 def _infer_nullable(series: pd.Series) -> bool:
     return bool(series.map(_is_blank).any())
 
