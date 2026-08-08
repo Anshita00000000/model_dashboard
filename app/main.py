@@ -16,6 +16,7 @@ from pathlib import Path
 import streamlit as st
 
 from app.core.storage import DEFAULT_STORAGE_ROOT, MetadataStore
+from app.ui import tab_data_prep
 
 MERCHANTS = ["Evoke", "Misya", "Nivaan"]
 
@@ -41,18 +42,13 @@ def main() -> None:
     )
 
     with tab_prep:
-        st.subheader(f"Datasets — {merchant}")
-        datasets = store.list_datasets(merchant=merchant)
-        if datasets:
-            st.dataframe(datasets, use_container_width=True)
-        else:
-            st.info("No datasets registered yet for this merchant.")
+        tab_data_prep.render(store, merchant, storage_root=DEFAULT_STORAGE_ROOT)
 
     with tab_train:
         st.subheader(f"Model bundles — {merchant}")
         bundles = store.list_model_bundles(merchant=merchant)
         if bundles:
-            st.dataframe(bundles, use_container_width=True)
+            st.dataframe(bundles, width="stretch")
         else:
             st.info("No model bundles trained yet for this merchant.")
 
@@ -65,7 +61,7 @@ def main() -> None:
             selected_bundle = st.selectbox("Model bundle", bundle_ids)
             runs = store.list_prediction_runs(bundle_id=selected_bundle)
             if runs:
-                st.dataframe(runs, use_container_width=True)
+                st.dataframe(runs, width="stretch")
             else:
                 st.info("No prediction runs yet for this bundle.")
 
