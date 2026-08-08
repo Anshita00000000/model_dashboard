@@ -1,7 +1,7 @@
 """Tab 7 — Predict.
 
 UI only: every decision made here is delegated to app.core.{predict,
-registry, schema}. Merchant selection happens in app/main.py's sidebar;
+registry, schema}. Merchant selection happens in app/ui/main.py's sidebar;
 this tab picks a trained bundle within that merchant, then a purpose="predict"
 dataset to score against it.
 """
@@ -75,7 +75,12 @@ def render(store: storage.MetadataStore, merchant: str, storage_root: Path | str
         return
 
     bundle_options = {f"{b['bundle_id']}  ·  {b['architecture']}  ·  {b['created_at']}": b for b in bundles}
-    bundle_row = bundle_options[st.selectbox("Model bundle", list(bundle_options.keys()))]
+    bundle_labels = list(bundle_options.keys())
+    bundle_default_idx = next(
+        (i for i, l in enumerate(bundle_labels) if bundle_options[l]["bundle_id"] == st.session_state.get("bundle_id")), 0
+    )
+    bundle_row = bundle_options[st.selectbox("Model bundle", bundle_labels, index=bundle_default_idx, key="prediction_bundle_select")]
+    st.session_state["bundle_id"] = bundle_row["bundle_id"]
 
     training_dataset = store.get_dataset(bundle_row["dataset_id"])
     c1, c2, c3 = st.columns(3)
@@ -98,7 +103,14 @@ def render(store: storage.MetadataStore, merchant: str, storage_root: Path | str
         f"{d['dataset_id']}  ·  {d['source_file']}  ·  {d['row_count']} rows  ·  {d['created_at']}": d
         for d in predict_datasets
     }
-    dataset_row = dataset_options[st.selectbox("Dataset to score", list(dataset_options.keys()))]
+    dataset_labels = list(dataset_options.keys())
+    dataset_default_idx = next(
+        (i for i, l in enumerate(dataset_labels) if dataset_options[l]["dataset_id"] == st.session_state.get("dataset_id")), 0
+    )
+    dataset_row = dataset_options[
+        st.selectbox("Dataset to score", dataset_labels, index=dataset_default_idx, key="prediction_dataset_select")
+    ]
+    st.session_state["dataset_id"] = dataset_row["dataset_id"]
 
     df = _load_dataframe(dataset_row["artifact_path"])
     bundle = _load_bundle(bundle_row["bundle_path"])

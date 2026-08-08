@@ -8,6 +8,7 @@ purpose="predict" datasets — there's nothing to train on a prediction batch.
 from __future__ import annotations
 
 import json
+import traceback
 from pathlib import Path
 from typing import Optional
 
@@ -113,7 +114,14 @@ def render(store: storage.MetadataStore, merchant: str, storage_root: Path | str
         f"{d['dataset_id']}  ·  {d['source_file']}  ·  {d['row_count']} rows  ·  {d['created_at']}": d
         for d in train_datasets
     }
-    dataset_row = dataset_options[st.selectbox("Dataset", list(dataset_options.keys()), key="training_dataset_select")]
+    dataset_labels = list(dataset_options.keys())
+    dataset_default_idx = next(
+        (i for i, l in enumerate(dataset_labels) if dataset_options[l]["dataset_id"] == st.session_state.get("dataset_id")), 0
+    )
+    dataset_row = dataset_options[
+        st.selectbox("Dataset", dataset_labels, index=dataset_default_idx, key="training_dataset_select")
+    ]
+    st.session_state["dataset_id"] = dataset_row["dataset_id"]
     if dataset_row["purpose"] == "predict":
         st.info("Training is skipped for prediction-purpose datasets.")
         return
@@ -126,7 +134,12 @@ def render(store: storage.MetadataStore, merchant: str, storage_root: Path | str
         f"{s['split_id']}  ·  {s['strategy']}  ·  {s['train_rows']} train / {s['test_rows']} test  ·  {s['created_at']}": s
         for s in splits
     }
-    split_row = split_options[st.selectbox("Split", list(split_options.keys()), key="training_split_select")]
+    split_labels = list(split_options.keys())
+    split_default_idx = next(
+        (i for i, l in enumerate(split_labels) if split_options[l]["split_id"] == st.session_state.get("split_id")), 0
+    )
+    split_row = split_options[st.selectbox("Split", split_labels, index=split_default_idx, key="training_split_select")]
+    st.session_state["split_id"] = split_row["split_id"]
 
     df = _load_dataframe(dataset_row["artifact_path"])
     ds_schema = _dataset_schema(dataset_row)
@@ -269,7 +282,9 @@ def render(store: storage.MetadataStore, merchant: str, storage_root: Path | str
 
     if st.button("Run training", type="primary"):
         run_results: dict[str, dict] = {}
-        for architecture in selected_architectures:
+        n_total = len(selected_architectures)
+        progress_bar = st.progress(0.0, text=f"0/{n_total} architecture(s) complete")
+        for idx, architecture in enumerate(selected_architectures):
             label = arch_mod.ARCHITECTURE_LABELS[architecture]
             with st.status(f"Training {label}...", expanded=True) as status:
                 try:
@@ -290,12 +305,22 @@ def render(store: storage.MetadataStore, merchant: str, storage_root: Path | str
                         st.write(f"stage {outcome.name!r}: {outcome.n_rows} rows, {outcome.n_positive} positive" + (" — fell back to route B alone" if outcome.route_b_only else ""))
 
                     evaluation = train_mod.evaluate_run(result, test_df, funnel, allow_implausible_override=allow_override)
-                    run_results[architecture] = {"result": result, "evaluation": evaluation, "error": None}
+                    run_results[architecture] = {"result": result, "evaluation": evaluation, "error": None, "traceback": None}
                     status.update(label=f"{label} — done", state="complete")
-                except (leakage_mod.LeakageGateFailure, AssertionError) as exc:
-                    run_results[architecture] = {"result": None, "evaluation": None, "error": str(exc)}
-                    status.update(label=f"{label} — failed", state="error")
+                except leakage_mod.LeakageGateFailure as exc:
+                    run_results[architecture] = {
+                        "result": None, "evaluation": None, "error": str(exc), "traceback": traceback.format_exc(),
+                    }
+                    status.update(label=f"{label} — blocked by a leakage gate", state="error")
                     st.error(str(exc))
+                except Exception as exc:  # noqa: BLE001 - never swallow; every failure is surfaced, run continues to the next architecture
+                    message = f"{type(exc).__name__}: {exc}"
+                    run_results[architecture] = {
+                        "result": None, "evaluation": None, "error": message, "traceback": traceback.format_exc(),
+                    }
+                    status.update(label=f"{label} — failed unexpectedly", state="error")
+                    st.error(message)
+            progress_bar.progress((idx + 1) / n_total, text=f"{idx + 1}/{n_total} architecture(s) complete")
 
         st.session_state[session_key] = run_results
 
@@ -333,6 +358,9 @@ def render(store: storage.MetadataStore, merchant: str, storage_root: Path | str
         with st.expander(label, expanded=payload["error"] is not None):
             if payload["error"] is not None:
                 st.error(payload["error"])
+                if payload.get("traceback"):
+                    with st.expander("Full traceback"):
+                        st.code(payload["traceback"], language="python")
                 continue
 
             result: train_mod.TrainRunResult = payload["result"]
@@ -418,4 +446,5 @@ def render(store: storage.MetadataStore, merchant: str, storage_root: Path | str
                     bundle_path=str(bundle_path),
                     created_by=CREATED_BY,
                 )
+                st.session_state["bundle_id"] = bundle_id
                 st.success(f"Saved bundle_id = {bundle_id}")

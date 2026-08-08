@@ -67,8 +67,11 @@ def render(store: storage.MetadataStore, merchant: str, storage_root: Path | str
         f"{d['dataset_id']}  ·  {d['source_file']}  ·  {d['row_count']} rows  ·  {d['created_at']}": d
         for d in train_datasets
     }
-    selected_label = st.selectbox("Dataset", list(options.keys()), key="data_prep_dataset_select")
+    labels = list(options.keys())
+    default_idx = next((i for i, l in enumerate(labels) if options[l]["dataset_id"] == st.session_state.get("dataset_id")), 0)
+    selected_label = st.selectbox("Dataset", labels, index=default_idx, key="data_prep_dataset_select")
     dataset_row = options[selected_label]
+    st.session_state["dataset_id"] = dataset_row["dataset_id"]
 
     # Belt-and-suspenders: this tab is a no-op for anything but purpose="train",
     # even though the selector above already filters to train-purpose datasets.
@@ -188,5 +191,6 @@ def render(store: storage.MetadataStore, merchant: str, storage_root: Path | str
                 split_id=split_id,
                 result=result,
             )
+            st.session_state["split_id"] = split_id
             st.success(f"Saved split_id = {split_id}")
             del st.session_state[session_key]

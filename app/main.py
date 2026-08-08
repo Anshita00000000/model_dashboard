@@ -1,55 +1,12 @@
-"""Streamlit entrypoint — UI layer only.
+"""Thin launcher — the real entrypoint is app/ui/main.py.
 
-Every piece of actual logic lives in app/core/ (schema, storage, registry) and
-is imported here, never re-implemented. This file is free to be thrown away
-and replaced by a FastAPI service without touching app/core/.
-
-Phase 1 (this build): foundation for tabs 5 (data prep), 6 (train/test), and
-7 (predict). Phase 2 (tabs 1-4: upload, EDA, field mapping, enrichment) is not
-built yet — see CLAUDE.md.
+Kept so `streamlit run app/main.py` and `streamlit run app/ui/main.py` both
+work; `make run` uses the latter directly.
 """
 
 from __future__ import annotations
 
-from pathlib import Path
-
-import streamlit as st
-
-from app.core.storage import DEFAULT_STORAGE_ROOT, MetadataStore
-from app.ui import tab_data_prep, tab_prediction, tab_training
-
-MERCHANTS = ["Evoke", "Misya", "Nivaan"]
-
-st.set_page_config(page_title="CarePay Lead Scoring", layout="wide")
-
-
-@st.cache_resource
-def get_metadata_store() -> MetadataStore:
-    return MetadataStore(Path(DEFAULT_STORAGE_ROOT) / "meta.db")
-
-
-def main() -> None:
-    st.title("CarePay Lead Scoring Dashboard")
-    st.caption("Phase 1 foundation — data prep, training/testing, and prediction.")
-
-    with st.sidebar:
-        merchant = st.selectbox("Merchant", MERCHANTS)
-
-    store = get_metadata_store()
-
-    tab_prep, tab_train, tab_predict = st.tabs(
-        ["5 · Data Prep", "6 · Train & Test", "7 · Predict"]
-    )
-
-    with tab_prep:
-        tab_data_prep.render(store, merchant, storage_root=DEFAULT_STORAGE_ROOT)
-
-    with tab_train:
-        tab_training.render(store, merchant, storage_root=DEFAULT_STORAGE_ROOT)
-
-    with tab_predict:
-        tab_prediction.render(store, merchant, storage_root=DEFAULT_STORAGE_ROOT)
-
+from app.ui.main import main
 
 if __name__ == "__main__":
     main()
