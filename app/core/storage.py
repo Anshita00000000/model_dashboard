@@ -51,34 +51,42 @@ def _safe_segment(value: str) -> str:
 # ---------------------------------------------------------------------------
 
 
-def timestamped_path(root: Path, kind: str, merchant: str, name: str, ext: str) -> Path:
-    """{root}/{kind}/{merchant}/{YYYYMMDD_HHMMSS}_{name}.{ext}
-
-    Appends a numeric suffix if that exact path is already taken (two writes
-    in the same second), so storage is genuinely append-only.
+def _timestamped_candidate(directory: Path, stamp: str, stem: str, ext: Optional[str]) -> Path:
+    """Shared collision-avoidance: append a numeric suffix if the exact path is
+    already taken (two writes in the same second), so storage is genuinely
+    append-only. ext=None leaves the stem as the whole filename (no dot added) —
+    used when the name itself must be preserved verbatim, e.g. an original
+    uploaded filename that already carries its own extension.
     """
-    directory = Path(root) / kind / _safe_segment(merchant)
-    stamp = _utcnow_stamp()
-    safe_name = _safe_segment(name)
-    candidate = directory / f"{stamp}_{safe_name}.{ext}"
+    suffix = f".{ext}" if ext else ""
+    candidate = directory / f"{stamp}_{stem}{suffix}"
     counter = 1
     while candidate.exists():
-        candidate = directory / f"{stamp}_{safe_name}_{counter:03d}.{ext}"
+        candidate = directory / f"{stamp}_{stem}_{counter:03d}{suffix}"
         counter += 1
     return candidate
+
+
+def timestamped_path(root: Path, kind: str, merchant: str, name: str, ext: str) -> Path:
+    """{root}/{kind}/{merchant}/{YYYYMMDD_HHMMSS}_{name}.{ext}"""
+    directory = Path(root) / kind / _safe_segment(merchant)
+    return _timestamped_candidate(directory, _utcnow_stamp(), _safe_segment(name), ext)
 
 
 def unique_dir_path(root: Path, kind: str, merchant: str, name: str) -> Path:
     """Like timestamped_path but for a directory (used for model bundles)."""
     directory = Path(root) / kind / _safe_segment(merchant)
-    stamp = _utcnow_stamp()
-    safe_name = _safe_segment(name)
-    candidate = directory / f"{stamp}_{safe_name}"
-    counter = 1
-    while candidate.exists():
-        candidate = directory / f"{stamp}_{safe_name}_{counter:03d}"
-        counter += 1
-    return candidate
+    return _timestamped_candidate(directory, _utcnow_stamp(), _safe_segment(name), None)
+
+
+def timestamped_raw_file_path(root: Path | str, merchant: str, original_filename: str) -> Path:
+    """{root}/datasets/raw/{merchant}/{YYYYMMDD_HHMMSS}_{original_filename}
+
+    The original filename (extension included) is preserved as a single unit —
+    this is the byte-exact record of an uploaded file, so it keeps its own name.
+    """
+    directory = Path(root) / "datasets" / "raw" / _safe_segment(merchant)
+    return _timestamped_candidate(directory, _utcnow_stamp(), _safe_segment(original_filename), None)
 
 
 # ---------------------------------------------------------------------------
@@ -200,11 +208,29 @@ CREATE TABLE IF NOT EXISTS prediction_runs (
     output_path     TEXT NOT NULL,
     created_at      TIMESTAMP NOT NULL
 );
+
+CREATE TABLE IF NOT EXISTS raw_datasets (
+    raw_dataset_id    TEXT PRIMARY KEY,
+    merchant          TEXT NOT NULL,
+    purpose           TEXT NOT NULL,
+    original_filename TEXT NOT NULL,
+    stored_path       TEXT NOT NULL,
+    parquet_path      TEXT NOT NULL,
+    delimiter         TEXT,
+    encoding          TEXT NOT NULL,
+    sheet_name        TEXT,
+    row_count         INTEGER NOT NULL,
+    col_count         INTEGER NOT NULL,
+    content_hash      TEXT NOT NULL,
+    uploaded_by       TEXT NOT NULL,
+    notes             TEXT NOT NULL DEFAULT '',
+    created_at        TIMESTAMP NOT NULL
+);
 """
 
 # Every table is append-only: block UPDATE/DELETE at the database level so a
 # bug elsewhere in the app can't silently rewrite the audit trail.
-_APPEND_ONLY_TABLES = ("datasets", "splits", "model_bundles", "prediction_runs")
+_APPEND_ONLY_TABLES = ("datasets", "splits", "model_bundles", "prediction_runs", "raw_datasets")
 
 _TRIGGER_SQL_TEMPLATE = """
 CREATE TRIGGER IF NOT EXISTS {table}_no_update
@@ -402,3 +428,79 @@ class MetadataStore:
                     "SELECT * FROM prediction_runs WHERE bundle_id = ? ORDER BY created_at DESC", (bundle_id,)
                 ).fetchall()
             return [dict(r) for r in rows]
+
+    # -- raw_datasets ----------------------------------------------------------
+
+    def insert_raw_dataset(
+        self,
+        *,
+        raw_dataset_id: str,
+        merchant: str,
+        purpose: str,
+        original_filename: str,
+        stored_path: str,
+        parquet_path: str,
+        delimiter: Optional[str],
+        encoding: str,
+        sheet_name: Optional[str],
+        row_count: int,
+        col_count: int,
+        content_hash: str,
+        uploaded_by: str,
+        notes: str = "",
+    ) -> None:
+        with closing(self._connect()) as conn:
+            conn.execute(
+                """INSERT INTO raw_datasets
+                   (raw_dataset_id, merchant, purpose, original_filename, stored_path, parquet_path,
+                    delimiter, encoding, sheet_name, row_count, col_count, content_hash, uploaded_by,
+                    notes, created_at)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                (raw_dataset_id, merchant, purpose, original_filename, stored_path, parquet_path,
+                 delimiter, encoding, sheet_name, row_count, col_count, content_hash, uploaded_by,
+                 notes, utcnow_iso()),
+            )
+            conn.commit()
+
+    def get_raw_dataset(self, raw_dataset_id: str) -> Optional[dict]:
+        with closing(self._connect()) as conn:
+            row = conn.execute(
+                "SELECT * FROM raw_datasets WHERE raw_dataset_id = ?", (raw_dataset_id,)
+            ).fetchone()
+            return dict(row) if row else None
+
+    def list_raw_datasets(self, merchant: Optional[str] = None) -> list[dict]:
+        with closing(self._connect()) as conn:
+            if merchant is None:
+                rows = conn.execute("SELECT * FROM raw_datasets ORDER BY created_at DESC").fetchall()
+            else:
+                rows = conn.execute(
+                    "SELECT * FROM raw_datasets WHERE merchant = ? ORDER BY created_at DESC", (merchant,)
+                ).fetchall()
+            return [dict(r) for r in rows]
+
+    def find_raw_datasets_by_content_hash(self, content_hash: str) -> list[dict]:
+        """Prior uploads with identical bytes — used to warn on re-upload.
+        Never blocks the new insert; append-only means it's recorded anyway.
+        """
+        with closing(self._connect()) as conn:
+            rows = conn.execute(
+                "SELECT * FROM raw_datasets WHERE content_hash = ? ORDER BY created_at DESC", (content_hash,)
+            ).fetchall()
+            return [dict(r) for r in rows]
+
+    # -- cross-table -------------------------------------------------------
+
+    def list_merchants(self) -> list[str]:
+        """Every distinct merchant name seen anywhere in the audit trail, for
+        the Upload tab's autocomplete — new merchants are expected, so this is
+        never a fixed list.
+        """
+        with closing(self._connect()) as conn:
+            rows = conn.execute(
+                """SELECT merchant FROM raw_datasets
+                   UNION SELECT merchant FROM datasets
+                   UNION SELECT merchant FROM model_bundles
+                   ORDER BY merchant"""
+            ).fetchall()
+            return [r["merchant"] for r in rows]

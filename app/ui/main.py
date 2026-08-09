@@ -5,9 +5,10 @@ in app/core/ — this file, and the tab_*.py / run_history.py modules it wires
 together, only turn widgets into calls into that logic. See CLAUDE.md,
 "All logic in app/core/ — importable, testable, no Streamlit import."
 
-Tabs 1-4 (clinic file upload, EDA, field mapping to the canonical CRM schema,
-enrichment orchestration) are Phase 2 — not built yet. Tabs 5-7 (data prep,
-train/test, predict) are Phase 1, driven by an already-enriched CSV.
+Tabs 1-2 (raw file upload, raw EDA) are Phase 2's ingestion layer. Tabs 3-4
+(field mapping to the canonical CRM schema, enrichment orchestration) are
+Phase 2 — not built yet. Tabs 5-7 (data prep, train/test, predict) are Phase
+1, driven by an already-enriched CSV.
 """
 
 from __future__ import annotations
@@ -27,14 +28,16 @@ if str(_REPO_ROOT) not in sys.path:
 import streamlit as st  # noqa: E402 (must follow the sys.path fix above)
 
 from app.core.storage import DEFAULT_STORAGE_ROOT, MetadataStore  # noqa: E402
-from app.ui import run_history, tab_data_prep, tab_prediction, tab_training  # noqa: E402
+from app.ui import run_history, tab_data_prep, tab_prediction, tab_raw_eda, tab_training, tab_upload  # noqa: E402
 
-MERCHANTS = ["Evoke", "Misya", "Nivaan"]
+# Seed list so the sidebar isn't empty before any data exists; the merchant
+# picker is otherwise fully dynamic (store.list_merchants()) — Tab 1 accepts
+# any new merchant name, and it appears here as soon as something is uploaded
+# or trained for it.
+SEED_MERCHANTS = ["Evoke", "Misya", "Nivaan"]
 PURPOSES = ["train", "predict"]
 
 _PHASE2_TABS = [
-    ("1 · Upload", "Clinic lead file upload."),
-    ("2 · EDA", "Exploratory data analysis on the uploaded file."),
     ("3 · Field Mapping", "Map clinic-specific fields to the canonical CRM schema."),
     ("4 · Enrichment", "Orchestrate CRIF / Equifax / EPFO / salary estimator / PayU / LeadCreditEngineOutput."),
 ]
@@ -55,8 +58,21 @@ def _render_phase2_placeholder(title: str, description: str) -> None:
 def main() -> None:
     st.title("CarePay Lead Scoring Dashboard")
 
+    store = get_metadata_store()
+
     with st.sidebar:
-        merchant = st.selectbox("Merchant", MERCHANTS, key="merchant")
+        # Tab 1 (Upload) can only stage a merchant switch via this key BEFORE the
+        # selectbox below is instantiated — writing to st.session_state["merchant"]
+        # after that point raises (Streamlit forbids mutating an active widget's key).
+        if "_pending_merchant_switch" in st.session_state:
+            st.session_state["merchant"] = st.session_state.pop("_pending_merchant_switch")
+
+        merchant_options = sorted(set(SEED_MERCHANTS) | set(store.list_merchants()))
+        if st.session_state.get("merchant") not in merchant_options:
+            st.session_state["merchant"] = merchant_options[0]
+        # Value comes from st.session_state alone (pre-seeded above) — passing index=
+        # as well would make Streamlit warn about two competing sources of truth.
+        merchant = st.selectbox("Merchant", merchant_options, key="merchant")
         purpose = st.radio(
             "Purpose", PURPOSES, key="purpose", horizontal=True,
             help="'predict' disables Data Prep and Train & Test — nothing to prepare or train on a prediction batch.",
@@ -64,15 +80,21 @@ def main() -> None:
         st.caption("Phase 1 foundation — data prep, training/testing, and prediction, driven by an already-enriched CSV.")
 
     predict_mode = purpose == "predict"
-    store = get_metadata_store()
 
-    tab_labels = [label for label, _ in _PHASE2_TABS] + [
+    tab_labels = [
+        "1 · Upload", "2 · EDA", *[label for label, _ in _PHASE2_TABS],
         "5 · Data Prep" + (" 🔒" if predict_mode else ""),
         "6 · Train & Test" + (" 🔒" if predict_mode else ""),
         "7 · Predict",
     ]
     tabs = st.tabs(tab_labels)
-    phase2_tabs, tab_prep, tab_train, tab_predict = tabs[:4], tabs[4], tabs[5], tabs[6]
+    tab_upload_, tab_eda_, phase2_tabs, tab_prep, tab_train, tab_predict = tabs[0], tabs[1], tabs[2:4], tabs[4], tabs[5], tabs[6]
+
+    with tab_upload_:
+        tab_upload.render(store, storage_root=DEFAULT_STORAGE_ROOT)
+
+    with tab_eda_:
+        tab_raw_eda.render(store, merchant)
 
     for tab, (label, description) in zip(phase2_tabs, _PHASE2_TABS):
         with tab:
