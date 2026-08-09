@@ -105,30 +105,12 @@ def test_every_registered_adapter_fetches_and_transforms_without_error(source_na
 
 # ---------------------------------------------------------------------------
 # Equifax transform — sentinel handling
+#
+# Detailed coverage of transform()'s real payload-parsing logic (account
+# bucketing, ages, percentages, sentinel handling, identity fields, etc.)
+# lives in tests/test_equifax.py — these two just check the non-matched-status
+# short-circuit, which is payload-shape-agnostic.
 # ---------------------------------------------------------------------------
-
-
-def test_equifax_transform_maps_sentinel_score_to_none():
-    resp = RawResponse(
-        lead_id="1", source="equifax", status=ResponseStatus.SUCCESS_MATCHED.value,
-        payload={"hit": True, "score": -1, "score_band": None, "total_accounts": 2, "total_balance": 100.0,
-                 "enquiries_last_6m": 1, "delinquent_accounts": 0},
-        fetched_at="2024-01-01T00:00:00+00:00", batch_id="b",
-    )
-    features = EquifaxAdapter().transform(resp)
-    assert features["equifax_score"] is None
-    assert features["equifax_total_accounts"] == 2  # a real value alongside the sentinel score is preserved
-
-
-def test_equifax_transform_keeps_real_score():
-    resp = RawResponse(
-        lead_id="1", source="equifax", status=ResponseStatus.SUCCESS_MATCHED.value,
-        payload={"hit": True, "score": 720, "score_band": "B", "total_accounts": 2, "total_balance": 100.0,
-                 "enquiries_last_6m": 1, "delinquent_accounts": 0},
-        fetched_at="2024-01-01T00:00:00+00:00", batch_id="b",
-    )
-    features = EquifaxAdapter().transform(resp)
-    assert features["equifax_score"] == 720
 
 
 def test_equifax_transform_returns_all_null_for_no_hit_never_zero_filled():
