@@ -5,11 +5,11 @@ in app/core/ — this file, and the tab_*.py / run_history.py modules it wires
 together, only turn widgets into calls into that logic. See CLAUDE.md,
 "All logic in app/core/ — importable, testable, no Streamlit import."
 
-Tabs 1-3 (raw file upload, raw EDA, canonical mapping + enrichment) are Phase
-2's ingestion layer — enrichment API calls are stubbed (mock data), see
-app/core/enrichment/. Tab 4 (feature extraction) is Phase 2 — not built yet.
-Tabs 5-7 (data prep, train/test, predict) are Phase 1, driven by an
-already-enriched CSV.
+Tabs 1-4 (raw file upload, raw EDA, canonical mapping + enrichment, feature
+extraction/assembly) are Phase 2 — enrichment API calls are stubbed (mock
+data), see app/core/enrichment/. Tab 4's export (app/core/assemble.py)
+produces the Phase-1-compatible dataset artifact Tabs 5-7 (data prep,
+train/test, predict) consume.
 """
 
 from __future__ import annotations
@@ -29,7 +29,9 @@ if str(_REPO_ROOT) not in sys.path:
 import streamlit as st  # noqa: E402 (must follow the sys.path fix above)
 
 from app.core.storage import DEFAULT_STORAGE_ROOT, MetadataStore  # noqa: E402
-from app.ui import run_history, tab_data_prep, tab_enrichment, tab_prediction, tab_raw_eda, tab_training, tab_upload  # noqa: E402
+from app.ui import (  # noqa: E402
+    run_history, tab_data_prep, tab_enriched_eda, tab_enrichment, tab_prediction, tab_raw_eda, tab_training, tab_upload,
+)
 
 # Seed list so the sidebar isn't empty before any data exists; the merchant
 # picker is otherwise fully dynamic (store.list_merchants()) — Tab 1 accepts
@@ -44,17 +46,6 @@ st.set_page_config(page_title="CarePay Lead Scoring", layout="wide")
 @st.cache_resource
 def get_metadata_store() -> MetadataStore:
     return MetadataStore(Path(DEFAULT_STORAGE_ROOT) / "meta.db")
-
-
-def _render_phase2_placeholder(title: str, description: str) -> None:
-    st.subheader(title)
-    st.info(f"**Phase 2 — not built yet.** {description} See CLAUDE.md for the build plan.")
-
-
-_FEATURE_EXTRACTION_TAB = (
-    "4 · Feature Extraction",
-    "Build model-ready features from canonical + enriched fields.",
-)
 
 
 def main() -> None:
@@ -84,7 +75,7 @@ def main() -> None:
     predict_mode = purpose == "predict"
 
     tab_labels = [
-        "1 · Upload", "2 · EDA", "3 · Enrichment", _FEATURE_EXTRACTION_TAB[0],
+        "1 · Upload", "2 · EDA", "3 · Enrichment", "4 · Feature Extraction",
         "5 · Data Prep" + (" 🔒" if predict_mode else ""),
         "6 · Train & Test" + (" 🔒" if predict_mode else ""),
         "7 · Predict",
@@ -102,7 +93,7 @@ def main() -> None:
         tab_enrichment.render(store, merchant, storage_root=DEFAULT_STORAGE_ROOT)
 
     with tab_feat:
-        _render_phase2_placeholder(*_FEATURE_EXTRACTION_TAB)
+        tab_enriched_eda.render(store, merchant, storage_root=DEFAULT_STORAGE_ROOT)
 
     with tab_prep:
         if predict_mode:
