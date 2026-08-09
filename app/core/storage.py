@@ -89,6 +89,12 @@ def timestamped_raw_file_path(root: Path | str, merchant: str, original_filename
     return _timestamped_candidate(directory, _utcnow_stamp(), _safe_segment(original_filename), None)
 
 
+def timestamped_cleaned_file_path(root: Path | str, merchant: str, original_filename: str) -> Path:
+    """{root}/datasets/cleaned/{merchant}/{YYYYMMDD_HHMMSS}_{original_filename}"""
+    directory = Path(root) / "datasets" / "cleaned" / _safe_segment(merchant)
+    return _timestamped_candidate(directory, _utcnow_stamp(), _safe_segment(original_filename), None)
+
+
 # ---------------------------------------------------------------------------
 # Low-level atomic writers (exact path, used for files inside a bundle dir)
 # ---------------------------------------------------------------------------
@@ -226,11 +232,98 @@ CREATE TABLE IF NOT EXISTS raw_datasets (
     notes             TEXT NOT NULL DEFAULT '',
     created_at        TIMESTAMP NOT NULL
 );
+
+CREATE TABLE IF NOT EXISTS cleaned_datasets (
+    cleaned_dataset_id     TEXT PRIMARY KEY,
+    merchant               TEXT NOT NULL,
+    purpose                TEXT NOT NULL,
+    original_filename      TEXT NOT NULL,
+    stored_path            TEXT NOT NULL,
+    parquet_path           TEXT NOT NULL,
+    delimiter              TEXT,
+    encoding                TEXT NOT NULL,
+    sheet_name              TEXT,
+    row_count               INTEGER NOT NULL,
+    col_count                INTEGER NOT NULL,
+    content_hash             TEXT NOT NULL,
+    source_raw_dataset_id     TEXT REFERENCES raw_datasets(raw_dataset_id),
+    uploaded_by                TEXT NOT NULL,
+    notes                       TEXT NOT NULL DEFAULT '',
+    created_at                   TIMESTAMP NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS canonical_fields (
+    field_id        TEXT PRIMARY KEY,
+    name            TEXT NOT NULL UNIQUE,
+    dtype           TEXT NOT NULL,
+    required_level  TEXT NOT NULL,
+    unique_required INTEGER NOT NULL DEFAULT 0,
+    description     TEXT NOT NULL DEFAULT '',
+    created_at      TIMESTAMP NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS field_mappings (
+    mapping_id              TEXT PRIMARY KEY,
+    merchant                TEXT NOT NULL,
+    name                    TEXT NOT NULL,
+    version                 INTEGER NOT NULL,
+    mapping_json             TEXT NOT NULL,
+    unmapped_columns_json     TEXT NOT NULL,
+    created_by                 TEXT NOT NULL,
+    created_at                  TIMESTAMP NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS canonical_datasets (
+    canonical_dataset_id   TEXT PRIMARY KEY,
+    merchant               TEXT NOT NULL,
+    purpose                TEXT NOT NULL,
+    cleaned_dataset_id      TEXT NOT NULL REFERENCES cleaned_datasets(cleaned_dataset_id),
+    mapping_id               TEXT NOT NULL REFERENCES field_mappings(mapping_id),
+    row_count                 INTEGER NOT NULL,
+    col_count                  INTEGER NOT NULL,
+    artifact_path                TEXT NOT NULL,
+    validation_json               TEXT NOT NULL,
+    created_by                     TEXT NOT NULL,
+    created_at                       TIMESTAMP NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS enrichment_runs (
+    run_id                  TEXT PRIMARY KEY,
+    canonical_dataset_id    TEXT NOT NULL REFERENCES canonical_datasets(canonical_dataset_id),
+    source                  TEXT NOT NULL,
+    batch_id                 TEXT NOT NULL,
+    rows_attempted            INTEGER NOT NULL,
+    matched                    INTEGER NOT NULL,
+    no_hit                      INTEGER NOT NULL,
+    error                         INTEGER NOT NULL,
+    not_sent                       INTEGER NOT NULL,
+    started_at                       TIMESTAMP NOT NULL,
+    finished_at                        TIMESTAMP NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS enrichment_responses (
+    response_id     TEXT PRIMARY KEY,
+    run_id          TEXT NOT NULL REFERENCES enrichment_runs(run_id),
+    lead_id         TEXT NOT NULL,
+    source           TEXT NOT NULL,
+    status            TEXT NOT NULL,
+    payload_json       TEXT NOT NULL,
+    fetched_at           TIMESTAMP NOT NULL,
+    batch_id              TEXT NOT NULL,
+    created_at              TIMESTAMP NOT NULL
+);
 """
 
 # Every table is append-only: block UPDATE/DELETE at the database level so a
-# bug elsewhere in the app can't silently rewrite the audit trail.
-_APPEND_ONLY_TABLES = ("datasets", "splits", "model_bundles", "prediction_runs", "raw_datasets")
+# bug elsewhere in the app can't silently rewrite the audit trail. canonical_fields
+# is a growing config list (fields are only ever added, never renamed/removed here
+# either — see app/core/canonical.py, which treats "already exists" as a no-op)
+# so it gets the same protection as the audit-trail tables.
+_APPEND_ONLY_TABLES = (
+    "datasets", "splits", "model_bundles", "prediction_runs", "raw_datasets",
+    "cleaned_datasets", "canonical_fields", "field_mappings", "canonical_datasets",
+    "enrichment_runs", "enrichment_responses",
+)
 
 _TRIGGER_SQL_TEMPLATE = """
 CREATE TRIGGER IF NOT EXISTS {table}_no_update
@@ -489,6 +582,260 @@ class MetadataStore:
             ).fetchall()
             return [dict(r) for r in rows]
 
+    # -- cleaned_datasets ----------------------------------------------------
+
+    def insert_cleaned_dataset(
+        self,
+        *,
+        cleaned_dataset_id: str,
+        merchant: str,
+        purpose: str,
+        original_filename: str,
+        stored_path: str,
+        parquet_path: str,
+        delimiter: Optional[str],
+        encoding: str,
+        sheet_name: Optional[str],
+        row_count: int,
+        col_count: int,
+        content_hash: str,
+        source_raw_dataset_id: Optional[str],
+        uploaded_by: str,
+        notes: str = "",
+    ) -> None:
+        with closing(self._connect()) as conn:
+            conn.execute(
+                """INSERT INTO cleaned_datasets
+                   (cleaned_dataset_id, merchant, purpose, original_filename, stored_path, parquet_path,
+                    delimiter, encoding, sheet_name, row_count, col_count, content_hash,
+                    source_raw_dataset_id, uploaded_by, notes, created_at)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                (cleaned_dataset_id, merchant, purpose, original_filename, stored_path, parquet_path,
+                 delimiter, encoding, sheet_name, row_count, col_count, content_hash,
+                 source_raw_dataset_id, uploaded_by, notes, utcnow_iso()),
+            )
+            conn.commit()
+
+    def get_cleaned_dataset(self, cleaned_dataset_id: str) -> Optional[dict]:
+        with closing(self._connect()) as conn:
+            row = conn.execute(
+                "SELECT * FROM cleaned_datasets WHERE cleaned_dataset_id = ?", (cleaned_dataset_id,)
+            ).fetchone()
+            return dict(row) if row else None
+
+    def list_cleaned_datasets(self, merchant: Optional[str] = None) -> list[dict]:
+        with closing(self._connect()) as conn:
+            if merchant is None:
+                rows = conn.execute("SELECT * FROM cleaned_datasets ORDER BY created_at DESC").fetchall()
+            else:
+                rows = conn.execute(
+                    "SELECT * FROM cleaned_datasets WHERE merchant = ? ORDER BY created_at DESC", (merchant,)
+                ).fetchall()
+            return [dict(r) for r in rows]
+
+    def find_cleaned_datasets_by_content_hash(self, content_hash: str) -> list[dict]:
+        with closing(self._connect()) as conn:
+            rows = conn.execute(
+                "SELECT * FROM cleaned_datasets WHERE content_hash = ? ORDER BY created_at DESC", (content_hash,)
+            ).fetchall()
+            return [dict(r) for r in rows]
+
+    # -- canonical_fields ------------------------------------------------------
+
+    def insert_canonical_field(
+        self,
+        *,
+        field_id: str,
+        name: str,
+        dtype: str,
+        required_level: str,
+        unique_required: bool = False,
+        description: str = "",
+    ) -> None:
+        with closing(self._connect()) as conn:
+            conn.execute(
+                """INSERT INTO canonical_fields
+                   (field_id, name, dtype, required_level, unique_required, description, created_at)
+                   VALUES (?, ?, ?, ?, ?, ?, ?)""",
+                (field_id, name, dtype, required_level, int(unique_required), description, utcnow_iso()),
+            )
+            conn.commit()
+
+    def get_canonical_field_by_name(self, name: str) -> Optional[dict]:
+        with closing(self._connect()) as conn:
+            row = conn.execute("SELECT * FROM canonical_fields WHERE name = ?", (name,)).fetchone()
+            return dict(row) if row else None
+
+    def list_canonical_fields(self) -> list[dict]:
+        with closing(self._connect()) as conn:
+            rows = conn.execute("SELECT * FROM canonical_fields ORDER BY created_at ASC").fetchall()
+            return [dict(r) for r in rows]
+
+    # -- field_mappings --------------------------------------------------------
+
+    def insert_field_mapping(
+        self,
+        *,
+        mapping_id: str,
+        merchant: str,
+        name: str,
+        version: int,
+        mapping_json: str,
+        unmapped_columns_json: str,
+        created_by: str,
+    ) -> None:
+        with closing(self._connect()) as conn:
+            conn.execute(
+                """INSERT INTO field_mappings
+                   (mapping_id, merchant, name, version, mapping_json, unmapped_columns_json, created_by, created_at)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
+                (mapping_id, merchant, name, version, mapping_json, unmapped_columns_json, created_by, utcnow_iso()),
+            )
+            conn.commit()
+
+    def get_field_mapping(self, mapping_id: str) -> Optional[dict]:
+        with closing(self._connect()) as conn:
+            row = conn.execute("SELECT * FROM field_mappings WHERE mapping_id = ?", (mapping_id,)).fetchone()
+            return dict(row) if row else None
+
+    def list_field_mappings(self, merchant: Optional[str] = None) -> list[dict]:
+        with closing(self._connect()) as conn:
+            if merchant is None:
+                rows = conn.execute("SELECT * FROM field_mappings ORDER BY created_at DESC").fetchall()
+            else:
+                rows = conn.execute(
+                    "SELECT * FROM field_mappings WHERE merchant = ? ORDER BY created_at DESC", (merchant,)
+                ).fetchall()
+            return [dict(r) for r in rows]
+
+    # -- canonical_datasets ------------------------------------------------------
+
+    def insert_canonical_dataset(
+        self,
+        *,
+        canonical_dataset_id: str,
+        merchant: str,
+        purpose: str,
+        cleaned_dataset_id: str,
+        mapping_id: str,
+        row_count: int,
+        col_count: int,
+        artifact_path: str,
+        validation_json: str,
+        created_by: str,
+    ) -> None:
+        with closing(self._connect()) as conn:
+            conn.execute(
+                """INSERT INTO canonical_datasets
+                   (canonical_dataset_id, merchant, purpose, cleaned_dataset_id, mapping_id,
+                    row_count, col_count, artifact_path, validation_json, created_by, created_at)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                (canonical_dataset_id, merchant, purpose, cleaned_dataset_id, mapping_id,
+                 row_count, col_count, artifact_path, validation_json, created_by, utcnow_iso()),
+            )
+            conn.commit()
+
+    def get_canonical_dataset(self, canonical_dataset_id: str) -> Optional[dict]:
+        with closing(self._connect()) as conn:
+            row = conn.execute(
+                "SELECT * FROM canonical_datasets WHERE canonical_dataset_id = ?", (canonical_dataset_id,)
+            ).fetchone()
+            return dict(row) if row else None
+
+    def list_canonical_datasets(self, merchant: Optional[str] = None) -> list[dict]:
+        with closing(self._connect()) as conn:
+            if merchant is None:
+                rows = conn.execute("SELECT * FROM canonical_datasets ORDER BY created_at DESC").fetchall()
+            else:
+                rows = conn.execute(
+                    "SELECT * FROM canonical_datasets WHERE merchant = ? ORDER BY created_at DESC", (merchant,)
+                ).fetchall()
+            return [dict(r) for r in rows]
+
+    # -- enrichment_runs ----------------------------------------------------------
+
+    def insert_enrichment_run(
+        self,
+        *,
+        run_id: str,
+        canonical_dataset_id: str,
+        source: str,
+        batch_id: str,
+        rows_attempted: int,
+        matched: int,
+        no_hit: int,
+        error: int,
+        not_sent: int,
+        started_at: str,
+        finished_at: str,
+    ) -> None:
+        with closing(self._connect()) as conn:
+            conn.execute(
+                """INSERT INTO enrichment_runs
+                   (run_id, canonical_dataset_id, source, batch_id, rows_attempted,
+                    matched, no_hit, error, not_sent, started_at, finished_at)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                (run_id, canonical_dataset_id, source, batch_id, rows_attempted,
+                 matched, no_hit, error, not_sent, started_at, finished_at),
+            )
+            conn.commit()
+
+    def get_enrichment_run(self, run_id: str) -> Optional[dict]:
+        with closing(self._connect()) as conn:
+            row = conn.execute("SELECT * FROM enrichment_runs WHERE run_id = ?", (run_id,)).fetchone()
+            return dict(row) if row else None
+
+    def list_enrichment_runs(self, canonical_dataset_id: Optional[str] = None) -> list[dict]:
+        with closing(self._connect()) as conn:
+            if canonical_dataset_id is None:
+                rows = conn.execute("SELECT * FROM enrichment_runs ORDER BY started_at DESC").fetchall()
+            else:
+                rows = conn.execute(
+                    "SELECT * FROM enrichment_runs WHERE canonical_dataset_id = ? ORDER BY started_at DESC",
+                    (canonical_dataset_id,),
+                ).fetchall()
+            return [dict(r) for r in rows]
+
+    # -- enrichment_responses ----------------------------------------------------
+
+    def insert_enrichment_response(
+        self,
+        *,
+        response_id: str,
+        run_id: str,
+        lead_id: str,
+        source: str,
+        status: str,
+        payload_json: str,
+        fetched_at: str,
+        batch_id: str,
+    ) -> None:
+        with closing(self._connect()) as conn:
+            conn.execute(
+                """INSERT INTO enrichment_responses
+                   (response_id, run_id, lead_id, source, status, payload_json, fetched_at, batch_id, created_at)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                (response_id, run_id, lead_id, source, status, payload_json, fetched_at, batch_id, utcnow_iso()),
+            )
+            conn.commit()
+
+    def list_enrichment_responses(
+        self, run_id: Optional[str] = None, lead_id: Optional[str] = None
+    ) -> list[dict]:
+        with closing(self._connect()) as conn:
+            clauses, params = [], []
+            if run_id is not None:
+                clauses.append("run_id = ?")
+                params.append(run_id)
+            if lead_id is not None:
+                clauses.append("lead_id = ?")
+                params.append(lead_id)
+            where = f"WHERE {' AND '.join(clauses)}" if clauses else ""
+            rows = conn.execute(
+                f"SELECT * FROM enrichment_responses {where} ORDER BY created_at DESC", params
+            ).fetchall()
+            return [dict(r) for r in rows]
+
     # -- cross-table -------------------------------------------------------
 
     def list_merchants(self) -> list[str]:
@@ -501,6 +848,8 @@ class MetadataStore:
                 """SELECT merchant FROM raw_datasets
                    UNION SELECT merchant FROM datasets
                    UNION SELECT merchant FROM model_bundles
+                   UNION SELECT merchant FROM cleaned_datasets
+                   UNION SELECT merchant FROM canonical_datasets
                    ORDER BY merchant"""
             ).fetchall()
             return [r["merchant"] for r in rows]

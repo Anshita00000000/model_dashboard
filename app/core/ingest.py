@@ -288,3 +288,64 @@ def save_raw_dataset(
         content_hash=content_hash,
         duplicate_of=duplicate_of,
     )
+
+
+@dataclass(frozen=True)
+class CleanedSaveResult:
+    cleaned_dataset_id: str
+    stored_path: Path
+    parquet_path: Path
+    content_hash: str
+    duplicate_of: list[dict]  # prior cleaned_datasets rows with identical bytes; empty if none
+
+
+def save_cleaned_dataset(
+    *,
+    store: storage.MetadataStore,
+    root: Path | str,
+    merchant: str,
+    purpose: str,
+    result: IngestResult,
+    uploaded_by: str,
+    source_raw_dataset_id: Optional[str] = None,
+    notes: str = "",
+) -> CleanedSaveResult:
+    """Same robust loader, same byte-exact-plus-parquet storage pattern as
+    save_raw_dataset — this is the second upload point (Tab 3): a file the
+    team has already cleaned offline. Still no schema is applied here; that
+    happens later, in app.core.canonical's field mapping.
+    """
+    cleaned_dataset_id = new_raw_dataset_id()
+    content_hash = content_hash_of(result.original_bytes)
+    duplicate_of = store.find_cleaned_datasets_by_content_hash(content_hash)
+
+    stored_path = storage.timestamped_cleaned_file_path(root, merchant, result.original_filename)
+    storage.write_bytes_atomic(stored_path, result.original_bytes)
+
+    parquet_path = storage.save_dataframe(result.df, "cleaned", merchant, f"{cleaned_dataset_id}_profile", root=root)
+
+    store.insert_cleaned_dataset(
+        cleaned_dataset_id=cleaned_dataset_id,
+        merchant=merchant,
+        purpose=purpose,
+        original_filename=result.original_filename,
+        stored_path=str(stored_path),
+        parquet_path=str(parquet_path),
+        delimiter=result.delimiter,
+        encoding=result.encoding,
+        sheet_name=result.sheet_name,
+        row_count=result.row_count,
+        col_count=result.col_count,
+        content_hash=content_hash,
+        source_raw_dataset_id=source_raw_dataset_id,
+        uploaded_by=uploaded_by,
+        notes=notes,
+    )
+
+    return CleanedSaveResult(
+        cleaned_dataset_id=cleaned_dataset_id,
+        stored_path=stored_path,
+        parquet_path=parquet_path,
+        content_hash=content_hash,
+        duplicate_of=duplicate_of,
+    )

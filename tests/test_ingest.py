@@ -197,3 +197,42 @@ def test_save_raw_dataset_preserves_original_filename_on_disk(tmp_path):
     result = ingest.load_raw_file(b"a,b\n1,2\n", "quarterly leads (v2).csv")
     save = ingest.save_raw_dataset(store=store, root=tmp_path, merchant="Evoke", purpose="train", result=result, uploaded_by="tester")
     assert save.stored_path.name.endswith("_quarterly_leads__v2_.csv")
+
+
+# ---------------------------------------------------------------------------
+# Cleaned-file storage (Tab 3's second upload point)
+# ---------------------------------------------------------------------------
+
+
+def test_save_cleaned_dataset_is_byte_exact_and_appends_on_duplicate(tmp_path):
+    store = storage.MetadataStore(tmp_path / "meta.db")
+    original_bytes = b"lead_id,phone\n1,9000000001\n2,9000000002\n"
+    result = ingest.load_raw_file(original_bytes, "leads_cleaned.csv")
+
+    save1 = ingest.save_cleaned_dataset(store=store, root=tmp_path, merchant="Evoke", purpose="train", result=result, uploaded_by="tester")
+    assert save1.duplicate_of == []
+    assert save1.stored_path.read_bytes() == original_bytes
+    assert save1.parquet_path.exists()
+
+    row = store.get_cleaned_dataset(save1.cleaned_dataset_id)
+    assert row["merchant"] == "Evoke"
+    assert row["source_raw_dataset_id"] is None
+
+    save2 = ingest.save_cleaned_dataset(store=store, root=tmp_path, merchant="Evoke", purpose="train", result=result, uploaded_by="tester")
+    assert len(save2.duplicate_of) == 1
+    assert save1.cleaned_dataset_id != save2.cleaned_dataset_id
+    assert len(store.list_cleaned_datasets(merchant="Evoke")) == 2
+
+
+def test_save_cleaned_dataset_records_lineage_link(tmp_path):
+    store = storage.MetadataStore(tmp_path / "meta.db")
+    raw_result = ingest.load_raw_file(b"a,b\n1,2\n", "raw.csv")
+    raw_save = ingest.save_raw_dataset(store=store, root=tmp_path, merchant="Evoke", purpose="train", result=raw_result, uploaded_by="tester")
+
+    cleaned_result = ingest.load_raw_file(b"a,b\n1,2\n", "cleaned.csv")
+    save = ingest.save_cleaned_dataset(
+        store=store, root=tmp_path, merchant="Evoke", purpose="train", result=cleaned_result,
+        uploaded_by="tester", source_raw_dataset_id=raw_save.raw_dataset_id,
+    )
+    row = store.get_cleaned_dataset(save.cleaned_dataset_id)
+    assert row["source_raw_dataset_id"] == raw_save.raw_dataset_id
